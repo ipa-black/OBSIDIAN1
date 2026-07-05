@@ -1,0 +1,61 @@
+name: Build Dylib Engine
+
+on:
+  workflow_dispatch:
+    inputs:
+      code_content:
+        required: true
+      dylib_name:
+        required: true
+      chat_id:
+        required: true
+
+jobs:
+  build:
+    runs-on: macos-latest
+
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v4
+
+      # 1. نظام الكاش: لتسريع العملية وعدم تحميل المكاتب كل مرة
+      - name: Cache External Libraries
+        id: cache-deps
+        uses: actions/cache@v3
+        with:
+          path: ./external_libs
+          key: ${{ runner.os }}-libs-v1
+
+      # 2. تحميل المكاتب في حال لم تكن في الكاش (تعمل لمرة واحدة فقط)
+      - name: Download Dependencies (If not cached)
+        if: steps.cache-deps.outputs.cache-hit != 'true'
+        run: |
+          mkdir -p ./external_libs
+          echo "Downloading headers and dependencies..."
+          # (يمكنك إضافة أوامر curl هنا لتحميل أي مكاتب تحتاجها)
+          echo "Done caching."
+
+      # 3. حفظ كود المستخدم في ملف
+      - name: Save Source Code
+        run: echo "${{ github.event.inputs.code_content }}" > source.m
+
+      # 4. ترجمة الكود وبناء الدايلب للآيفون
+      - name: Compile Dylib
+        run: |
+          clang -dynamiclib \
+            -isysroot $(xcrun --sdk iphoneos --show-sdk-path) \
+            -arch arm64 \
+            -miphoneos-version-min=14.0 \
+            -I./external_libs \
+            -framework Foundation \
+            -framework UIKit \
+            -o "${{ github.event.inputs.dylib_name }}.dylib" \
+            source.m
+
+      # 5. إرسال النتيجة إلى التليجرام
+      - name: Send Document to Telegram
+        run: |
+          curl -X POST "https://api.telegram.org/bot${{ secrets.TELEGRAM_BOT_TOKEN }}/sendDocument" \
+            -F chat_id="${{ github.event.inputs.chat_id }}" \
+            -F document=@"${{ github.event.inputs.dylib_name }}.dylib" \
+            -F caption="✅ تم بناء ملف الـ dylib بنجاح سحابياً! 🚀"
