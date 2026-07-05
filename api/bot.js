@@ -1,26 +1,16 @@
 const { Telegraf, Markup } = require('telegraf');
-const { Redis } = require('@upstash/redis');
 
-// إعداد التليجرام وقاعدة بيانات Redis
 const bot = new Telegraf(process.env.TELEGRAM_BOT_TOKEN);
-const redis = new Redis({
-    url: process.env.KV_REST_API_URL,
-    token: process.env.KV_REST_API_TOKEN,
-});
-
 const ADMIN_CHAT_ID = parseInt(process.env.ADMIN_CHAT_ID);
 
-// دالة للتحقق من اشتراك المستخدم
-async function isPremiumUser(chatId) {
-    const expiryDate = await redis.get(`premium_user_${chatId}`);
-    if (!expiryDate) return false;
-    
-    // التحقق مما إذا كان وقت انتهاء الاشتراك أكبر من الوقت الحالي
-    const now = new Date().getTime();
-    return parseInt(expiryDate) > now;
-}
+// ==========================================
+// 🧠 الذاكرة العشوائية (In-Memory Storage)
+// ==========================================
+const sessions = new Map();        // لحفظ الأكواد المحذوفة مؤقتاً (رقم الشات -> الكود)
+const activationCodes = new Map(); // لحفظ أكواد التفعيل (الكود -> عدد الأيام)
+const premiumUsers = new Map();    // لحفظ المشتركين (رقم الشات -> تاريخ الانتهاء بالملي ثانية)
 
-// دالة إرسال الطلب وتشغيل جيت هاب
+// دالة إرسال الطلب إلى GitHub Actions
 async function triggerGitHubAction(code, dylibName, chatId) {
     const url = `https://api.github.com/repos/${process.env.GITHUB_USERNAME}/${process.env.GITHUB_REPO}/actions/workflows/build.yml/dispatches`;
     
@@ -46,37 +36,35 @@ async function triggerGitHubAction(code, dylibName, chatId) {
 }
 
 // ==========================================
-// أوامر ولوحة تحكم الآدمن (أزرار تفاعلية)
+// ⚙️ أوامر الآدمن (لوحة التحكم لتوليد الأكواد)
 // ==========================================
 bot.command('admin', async (ctx) => {
     if (ctx.chat.id !== ADMIN_CHAT_ID) return;
 
-    // إنشاء أزرار لوحة التحكم
     const keyboard = Markup.inlineKeyboard([
         [Markup.button.callback('توليد كود (شهر) 🎟️', 'gen_30')],
         [Markup.button.callback('توليد كود (أسبوع) 🎟️', 'gen_7')],
-        [Markup.button.callback('توليد كود (يوم واحد للتجربة) ⏱️', 'gen_1')]
+        [Markup.button.callback('توليد كود (يوم واحد) ⏱️', 'gen_1')]
     ]);
 
     await ctx.reply('⚙️ أهلاً بك في لوحة تحكم الإدارة.\nاختر مدة الكود (استخدام واحد فقط):', keyboard);
 });
 
-// التعامل مع ضغطات الأزرار من الآدمن
 bot.action(/gen_(\d+)/, async (ctx) => {
     if (ctx.chat.id !== ADMIN_CHAT_ID) return;
 
-    const days = parseInt(ctx.match[1]); // استخراج عدد الأيام من الزر (30, 7, 1)
-    const code = 'VIP-' + Math.random().toString(36).substr(2, 8).toUpperCase(); // توليد كود عشوائي
+    const days = parseInt(ctx.match[1]);
+    const code = 'VIP-' + Math.random().toString(36).substr(2, 8).toUpperCase();
 
-    // حفظ الكود في Redis مع تحديد عدد الأيام كقيمة
-    await redis.set(`activation_code_${code}`, days);
+    // حفظ الكود في الذاكرة العشوائية
+    activationCodes.set(code, days);
 
     await ctx.reply(`✅ تم توليد كود استخدام واحد بنجاح:\n\n\`${code}\`\n\nالمدة: ${days} يوم.`, { parse_mode: 'Markdown' });
-    await ctx.answerCbQuery('تم إنشاء الكود بنجاح'); // إخفاء علامة التحميل من الزر
+    await ctx.answerCbQuery('تم إنشاء الكود بنجاح');
 });
 
 // ==========================================
-// أوامر المشتركين والتفعيل
+// 🔓 أوامر المشتركين والتفعيل
 // ==========================================
 bot.start((ctx) => {
     ctx.reply("👋 مرحباً بك في بوت تجميع ملفات الـ dylib.\n\n🔑 لتفعيل حسابك، أرسل:\n`/activate كود_التفعيل`", { parse_mode: 'Markdown' });
@@ -89,46 +77,44 @@ bot.command('activate', async (ctx) => {
 
     if (!codeInput) return ctx.reply("⚠️ الرجاء إدخال الكود مع الأمر.\nمثال: `/activate VIP-XXXXX`", { parse_mode: 'Markdown' });
 
-    // 1. البحث عن الكود في قاعدة البيانات
-    const days = await redis.get(`activation_code_${codeInput}`);
+    // البحث عن الكود في الذاكرة العشوائية
+    if (!activationCodes.has(codeInput)) {
+        return ctx.reply("❌ الكود غير صحيح، أو تم استخدامه مسبقاً.");
+    }
 
-    if (!days) return ctx.reply("❌ الكود غير صحيح، أو تم استخدامه مسبقاً.");
+    const days = activationCodes.get(codeInput);
+    const expiryTimestamp = new Date().getTime() + (days * 24 * 60 * 60 * 1000);
 
-    // 2. حساب تاريخ الانتهاء بالملي ثانية
-    const now = new Date();
-    const expiryTimestamp = now.getTime() + (parseInt(days) * 24 * 60 * 60 * 1000);
-
-    // 3. إضافة المستخدم لقائمة البريميوم
-    await redis.set(`premium_user_${chatId}`, expiryTimestamp.toString());
-
-    // 4. الأهم: حذف الكود فوراً لضمان (استخدام واحد فقط)
-    await redis.del(`activation_code_${codeInput}`);
+    // إضافة المستخدم للذاكرة وحذف الكود
+    premiumUsers.set(chatId, expiryTimestamp);
+    activationCodes.delete(codeInput);
 
     const expiryDate = new Date(expiryTimestamp);
     ctx.reply(`🎉 تم تفعيل اشتراكك بنجاح لمدة ${days} يوم!\n📅 ينتهي الاشتراك في: ${expiryDate.toLocaleDateString()}`);
 });
 
 // ==========================================
-// استقبال الأكواد وإرسالها لـ GitHub
+// 🚀 استقبال الأكواد وإرسالها لجيت هاب
 // ==========================================
 bot.on(['text', 'document'], async (ctx) => {
     const chatId = ctx.chat.id;
     const messageId = ctx.message.message_id;
 
-    // تجاوز أوامر البوت الأساسية
     if (ctx.message.text && ctx.message.text.startsWith('/')) return;
 
-    // فحص الاشتراك
-    const hasAccess = await isPremiumUser(chatId);
-    if (!hasAccess) {
-        return ctx.reply("🔒 عذراً، هذا البوت خاص بالمشتركين فقط.\nاستخدم أمر /activate متبوعاً بكودك الخاص لتفعيل البوت.");
+    // فحص الاشتراك المدفوع من الذاكرة
+    const userExpiry = premiumUsers.get(chatId);
+    const hasAccess = userExpiry && userExpiry > new Date().getTime();
+
+    if (!hasAccess && chatId !== ADMIN_CHAT_ID) {
+        return ctx.reply("🔒 عذراً، هذا البوت خاص بالمشتركين فقط.\nاستخدم أمر /activate لتفعيل البوت.");
     }
 
     let codeContent = "";
     let isCodeInput = false;
 
-    // استخراج الكود من رسالة نصية أو ملف
-    if (ctx.message.text && (ctx.message.text.includes('#import') || ctx.message.text.includes('%hook'))) {
+    // التقاط الكود من النص أو الملف
+    if (ctx.message.text && (ctx.message.text.includes('#import') || ctx.message.text.includes('%hook') || ctx.message.text.includes('@interface'))) {
         codeContent = ctx.message.text;
         isCodeInput = true;
     } else if (ctx.message.document) {
@@ -141,38 +127,36 @@ bot.on(['text', 'document'], async (ctx) => {
         }
     }
 
-    // إذا تم إرسال كود برمجي
+    // إذا استلم البوت كوداً برمجياً
     if (isCodeInput) {
-        try { await ctx.deleteMessage(messageId); } catch (e) { } // حذف الرسالة للسرية
+        try { await ctx.deleteMessage(messageId); } catch (e) { } // الحذف للسرية
         
-        // حفظ الكود مؤقتاً في Redis
-        await redis.set(`session_code_${chatId}`, codeContent, { ex: 600 });
+        sessions.set(chatId, codeContent); // حفظ الكود في الذاكرة
         return ctx.reply("📥 تم استلام الكود وحذفه فوراً لحمايتك 🔒.\nأرسل الآن اسم ملف الـ dylib الناتج (مثال: `MyTweak`):", { parse_mode: 'Markdown' });
     }
 
-    // إذا أرسل المستخدم نصاً عادياً (نعتبره اسم الدايلب)
-    if (ctx.message.text) {
-        const savedCode = await redis.get(`session_code_${chatId}`);
-        if (savedCode) {
-            const dylibName = ctx.message.text.replace(/[^a-zA-Z0-9_-]/g, '');
-            if (!dylibName) return ctx.reply("❌ اسم الملف غير صالح.");
+    // إذا استلم البوت نصاً عادياً (اسم الدايلب)
+    if (ctx.message.text && sessions.has(chatId)) {
+        const savedCode = sessions.get(chatId);
+        const dylibName = ctx.message.text.replace(/[^a-zA-Z0-9_-]/g, ''); // تنظيف الاسم
+        
+        if (!dylibName) return ctx.reply("❌ اسم الملف غير صالح.");
 
-            await ctx.reply(`⚙️ جاري تشغيل سيرفرات GitHub لبناء \`${dylibName}.dylib\`...`, { parse_mode: 'Markdown' });
+        await ctx.reply(`⚙️ جاري تشغيل سيرفرات GitHub لبناء \`${dylibName}.dylib\`...`, { parse_mode: 'Markdown' });
 
-            try {
-                await triggerGitHubAction(savedCode, dylibName, chatId);
-                await redis.del(`session_code_${chatId}`); // تنظيف الجلسة
-            } catch (error) {
-                ctx.reply("❌ حدث خطأ أثناء الاتصال بسيرفر البناء.");
-            }
+        try {
+            await triggerGitHubAction(savedCode, dylibName, chatId);
+            sessions.delete(chatId); // تفريغ الذاكرة بعد الإرسال
+        } catch (error) {
+            ctx.reply("❌ حدث خطأ أثناء الاتصال بسيرفر البناء. تأكد من إعدادات GitHub PAT.");
         }
     }
 });
 
-// تشغيل الـ Webhook
+// تشغيل الـ Webhook الخاص بـ Vercel
 module.exports = async (req, res) => {
     if (req.method === 'POST') {
         await bot.handleUpdate(req.body, res);
     }
-    res.status(200).send('OK');
+    res.status(200).send('Bot is running...');
 };
