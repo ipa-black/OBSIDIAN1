@@ -11,16 +11,21 @@ const activationCodes = new Map(); // لحفظ أكواد التفعيل
 const premiumUsers = new Map();    // لحفظ المشتركين
 
 // ==========================================
-// 📡 دالة الاتصال بجيت هاب (محدثة لكشف الأخطاء)
+// 📡 دالة الاتصال بجيت هاب (مزودة بفلتر تنظيف إجباري)
 // ==========================================
 async function triggerGitHubAction(code, dylibName, chatId) {
-    const url = `https://api.github.com/repos/${process.env.GITHUB_USERNAME}/${process.env.GITHUB_REPO}/actions/workflows/build.yml/dispatches`;
+    // 🧹 الفلتر السحري: إزالة أي حروف مخفية أو مسافات زائدة من المتغيرات
+    const cleanPat = (process.env.GITHUB_PAT || "").replace(/[^\x20-\x7E]/g, "").trim();
+    const cleanUser = (process.env.GITHUB_USERNAME || "").replace(/[^\x20-\x7E]/g, "").trim();
+    const cleanRepo = (process.env.GITHUB_REPO || "").replace(/[^\x20-\x7E]/g, "").trim();
+
+    const url = `https://api.github.com/repos/${cleanUser}/${cleanRepo}/actions/workflows/build.yml/dispatches`;
     
     const response = await fetch(url, {
         method: 'POST',
         headers: {
             'Accept': 'application/vnd.github.v3+json',
-            'Authorization': `Bearer ${process.env.GITHUB_PAT}`,
+            'Authorization': `Bearer ${cleanPat}`,
             'User-Agent': 'Vercel-Bot'
         },
         body: JSON.stringify({
@@ -62,7 +67,7 @@ bot.action(/gen_(\d+)/, async (ctx) => {
     const days = parseInt(ctx.match[1]);
     const code = 'VIP-' + Math.random().toString(36).substr(2, 8).toUpperCase();
 
-    // حفظ الكود
+    // حفظ الكود في الذاكرة
     activationCodes.set(code, days);
 
     await ctx.reply(`✅ تم توليد كود استخدام واحد بنجاح:\n\n\`${code}\`\n\nالمدة: ${days} يوم.`, { parse_mode: 'Markdown' });
@@ -117,6 +122,7 @@ bot.on(['text', 'document'], async (ctx) => {
     let codeContent = "";
     let isCodeInput = false;
 
+    // التقاط الكود
     if (ctx.message.text && (ctx.message.text.includes('#import') || ctx.message.text.includes('%hook') || ctx.message.text.includes('@interface'))) {
         codeContent = ctx.message.text;
         isCodeInput = true;
@@ -130,6 +136,7 @@ bot.on(['text', 'document'], async (ctx) => {
         }
     }
 
+    // إذا تم استلام الكود البرمجي
     if (isCodeInput) {
         try { await ctx.deleteMessage(messageId); } catch (e) { } 
         
@@ -137,29 +144,29 @@ bot.on(['text', 'document'], async (ctx) => {
         return ctx.reply("📥 تم استلام الكود وحذفه فوراً لحمايتك 🔒.\nأرسل الآن اسم ملف الـ dylib الناتج (مثال: `MyTweak`):", { parse_mode: 'Markdown' });
     }
 
+    // إذا تم استلام الاسم العادي لتسمية الملف
     if (ctx.message.text && sessions.has(chatId)) {
         const savedCode = sessions.get(chatId);
         const dylibName = ctx.message.text.replace(/[^a-zA-Z0-9_-]/g, ''); 
         
         if (!dylibName) return ctx.reply("❌ اسم الملف غير صالح.");
 
-        await ctx.reply(`⚙️ جاري تشغيل سيرفرات GitHub لبناء \`${dylibName}.dylib\`...`, { parse_mode: 'Markdown' });
+        await ctx.reply(`⚙️ جاري إرسال الطلب وتشغيل سيرفرات GitHub لبناء \`${dylibName}.dylib\`...`, { parse_mode: 'Markdown' });
 
         try {
             await triggerGitHubAction(savedCode, dylibName, chatId);
             sessions.delete(chatId);
-            // إعلام المستخدم بنجاح الإرسال
             ctx.reply("✅ تم قبول الطلب من خوادم GitHub! جاري البناء وسيصلك الملف بعد لحظات 🚀.");
         } catch (error) {
-            // 🚨 هنا سيتم طباعة سبب الرفض بالتفصيل من جيت هاب 🚨
             ctx.reply(`❌ تم رفض الطلب من خوادم GitHub!\n\n**السبب التقني:**\n\`${error.message}\`\n\nيرجى مراجعة الخطأ أعلاه لحل المشكلة.`, { parse_mode: 'Markdown' });
         }
     }
 });
 
+// تشغيل البوت
 module.exports = async (req, res) => {
     if (req.method === 'POST') {
         await bot.handleUpdate(req.body, res);
     }
-    res.status(200).send('Bot is running...');
+    res.status(200).send('Bot is running smoothly...');
 };
