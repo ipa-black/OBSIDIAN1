@@ -6,11 +6,13 @@ const ADMIN_CHAT_ID = parseInt(process.env.ADMIN_CHAT_ID);
 // ==========================================
 // 🧠 الذاكرة العشوائية (In-Memory Storage)
 // ==========================================
-const sessions = new Map();        // لحفظ الأكواد المحذوفة مؤقتاً (رقم الشات -> الكود)
-const activationCodes = new Map(); // لحفظ أكواد التفعيل (الكود -> عدد الأيام)
-const premiumUsers = new Map();    // لحفظ المشتركين (رقم الشات -> تاريخ الانتهاء بالملي ثانية)
+const sessions = new Map();        // لحفظ الأكواد المحذوفة مؤقتاً
+const activationCodes = new Map(); // لحفظ أكواد التفعيل
+const premiumUsers = new Map();    // لحفظ المشتركين
 
-// دالة إرسال الطلب إلى GitHub Actions
+// ==========================================
+// 📡 دالة الاتصال بجيت هاب (محدثة لكشف الأخطاء)
+// ==========================================
 async function triggerGitHubAction(code, dylibName, chatId) {
     const url = `https://api.github.com/repos/${process.env.GITHUB_USERNAME}/${process.env.GITHUB_REPO}/actions/workflows/build.yml/dispatches`;
     
@@ -22,7 +24,7 @@ async function triggerGitHubAction(code, dylibName, chatId) {
             'User-Agent': 'Vercel-Bot'
         },
         body: JSON.stringify({
-            ref: 'main',
+            ref: 'main', // ⚠️ تأكد أن الفرع الأساسي في جيت هاب اسمه main وليس master
             inputs: {
                 code_content: code,
                 dylib_name: dylibName,
@@ -31,7 +33,11 @@ async function triggerGitHubAction(code, dylibName, chatId) {
         })
     });
 
-    if (!response.ok) throw new Error("GitHub API Error");
+    if (!response.ok) {
+        // سحب رسالة الخطأ الحقيقية من جيت هاب وتمريرها للبوت
+        const errText = await response.text();
+        throw new Error(`Code: ${response.status} - Details: ${errText}`);
+    }
     return true;
 }
 
@@ -56,7 +62,7 @@ bot.action(/gen_(\d+)/, async (ctx) => {
     const days = parseInt(ctx.match[1]);
     const code = 'VIP-' + Math.random().toString(36).substr(2, 8).toUpperCase();
 
-    // حفظ الكود في الذاكرة العشوائية
+    // حفظ الكود
     activationCodes.set(code, days);
 
     await ctx.reply(`✅ تم توليد كود استخدام واحد بنجاح:\n\n\`${code}\`\n\nالمدة: ${days} يوم.`, { parse_mode: 'Markdown' });
@@ -77,7 +83,6 @@ bot.command('activate', async (ctx) => {
 
     if (!codeInput) return ctx.reply("⚠️ الرجاء إدخال الكود مع الأمر.\nمثال: `/activate VIP-XXXXX`", { parse_mode: 'Markdown' });
 
-    // البحث عن الكود في الذاكرة العشوائية
     if (!activationCodes.has(codeInput)) {
         return ctx.reply("❌ الكود غير صحيح، أو تم استخدامه مسبقاً.");
     }
@@ -85,7 +90,6 @@ bot.command('activate', async (ctx) => {
     const days = activationCodes.get(codeInput);
     const expiryTimestamp = new Date().getTime() + (days * 24 * 60 * 60 * 1000);
 
-    // إضافة المستخدم للذاكرة وحذف الكود
     premiumUsers.set(chatId, expiryTimestamp);
     activationCodes.delete(codeInput);
 
@@ -102,7 +106,7 @@ bot.on(['text', 'document'], async (ctx) => {
 
     if (ctx.message.text && ctx.message.text.startsWith('/')) return;
 
-    // فحص الاشتراك المدفوع من الذاكرة
+    // فحص الاشتراك
     const userExpiry = premiumUsers.get(chatId);
     const hasAccess = userExpiry && userExpiry > new Date().getTime();
 
@@ -113,7 +117,6 @@ bot.on(['text', 'document'], async (ctx) => {
     let codeContent = "";
     let isCodeInput = false;
 
-    // التقاط الكود من النص أو الملف
     if (ctx.message.text && (ctx.message.text.includes('#import') || ctx.message.text.includes('%hook') || ctx.message.text.includes('@interface'))) {
         codeContent = ctx.message.text;
         isCodeInput = true;
@@ -127,18 +130,16 @@ bot.on(['text', 'document'], async (ctx) => {
         }
     }
 
-    // إذا استلم البوت كوداً برمجياً
     if (isCodeInput) {
-        try { await ctx.deleteMessage(messageId); } catch (e) { } // الحذف للسرية
+        try { await ctx.deleteMessage(messageId); } catch (e) { } 
         
-        sessions.set(chatId, codeContent); // حفظ الكود في الذاكرة
+        sessions.set(chatId, codeContent); 
         return ctx.reply("📥 تم استلام الكود وحذفه فوراً لحمايتك 🔒.\nأرسل الآن اسم ملف الـ dylib الناتج (مثال: `MyTweak`):", { parse_mode: 'Markdown' });
     }
 
-    // إذا استلم البوت نصاً عادياً (اسم الدايلب)
     if (ctx.message.text && sessions.has(chatId)) {
         const savedCode = sessions.get(chatId);
-        const dylibName = ctx.message.text.replace(/[^a-zA-Z0-9_-]/g, ''); // تنظيف الاسم
+        const dylibName = ctx.message.text.replace(/[^a-zA-Z0-9_-]/g, ''); 
         
         if (!dylibName) return ctx.reply("❌ اسم الملف غير صالح.");
 
@@ -146,14 +147,16 @@ bot.on(['text', 'document'], async (ctx) => {
 
         try {
             await triggerGitHubAction(savedCode, dylibName, chatId);
-            sessions.delete(chatId); // تفريغ الذاكرة بعد الإرسال
+            sessions.delete(chatId);
+            // إعلام المستخدم بنجاح الإرسال
+            ctx.reply("✅ تم قبول الطلب من خوادم GitHub! جاري البناء وسيصلك الملف بعد لحظات 🚀.");
         } catch (error) {
-            ctx.reply("❌ حدث خطأ أثناء الاتصال بسيرفر البناء. تأكد من إعدادات GitHub PAT.");
+            // 🚨 هنا سيتم طباعة سبب الرفض بالتفصيل من جيت هاب 🚨
+            ctx.reply(`❌ تم رفض الطلب من خوادم GitHub!\n\n**السبب التقني:**\n\`${error.message}\`\n\nيرجى مراجعة الخطأ أعلاه لحل المشكلة.`, { parse_mode: 'Markdown' });
         }
     }
 });
 
-// تشغيل الـ Webhook الخاص بـ Vercel
 module.exports = async (req, res) => {
     if (req.method === 'POST') {
         await bot.handleUpdate(req.body, res);
